@@ -318,4 +318,4 @@ async def health_check():
     """
     Health check endpoint that doesn't require authentication.
     """
-    return {"status": "
+    return {"status": "healthy"}
