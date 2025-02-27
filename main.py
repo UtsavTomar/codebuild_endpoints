@@ -73,7 +73,7 @@ def get_build_statuses(build_id: Optional[str] = None, environment: Optional[str
     connection = get_db_connection()
     cursor = connection.cursor()
     try:
-        query = "SELECT * FROM "agentic-platform".build_status WHERE 1=1 "
+        query = 'SELECT * FROM "agentic-platform".build_status WHERE 1=1 '
         params = []
         if build_id:
             query += " AND build_id = %s"
