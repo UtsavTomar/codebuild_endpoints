@@ -53,7 +53,7 @@ def create_build_status(item: BuildStatusCreate):
     try:
         cursor.execute(
             """
-            INSERT INTO build_status (agent_version_id, build_id, step, status, message, timestamp, environment)
+            INSERT INTO "agentic-platform".build_status (agent_version_id, build_id, step, status, message, timestamp, environment)
             VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id
             """,
             (item.agent_version_id, item.build_id, item.step, item.status, item.message, item.timestamp, item.environment)
@@ -73,7 +73,7 @@ def get_build_statuses(build_id: Optional[str] = None, environment: Optional[str
     connection = get_db_connection()
     cursor = connection.cursor()
     try:
-        query = "SELECT * FROM build_status WHERE 1=1 "
+        query = "SELECT * FROM "agentic-platform".build_status WHERE 1=1 "
         params = []
         if build_id:
             query += " AND build_id = %s"
