@@ -1,0 +1,315 @@
+from fastapi import FastAPI, HTTPException, Depends, Query, status, Security
+from fastapi.security import APIKeyHeader
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, ConfigDict
+from typing import List, Optional
+from datetime import datetime
+import databases
+import sqlalchemy
+from sqlalchemy import and_, desc
+import os
+
+# Configuration
+DATABASE_URL = os.getenv("DB_CONNECTION_STRING")
+API_KEY = os.getenv("API_KEY")
+
+# Database connection
+database = databases.Database(DATABASE_URL)
+
+# SQLAlchemy metadata
+metadata = sqlalchemy.MetaData()
+
+# Define build_status table
+build_status = sqlalchemy.Table(
+    "build_status",
+    metadata,
+    sqlalchemy.Column("id", sqlalchemy.Integer, primary_key=True),
+    sqlalchemy.Column("agent_version_id", sqlalchemy.String, index=True),
+    sqlalchemy.Column("build_id", sqlalchemy.String, index=True),
+    sqlalchemy.Column("step", sqlalchemy.String),
+    sqlalchemy.Column("status", sqlalchemy.String),
+    sqlalchemy.Column("message", sqlalchemy.Text),
+    sqlalchemy.Column("timestamp", sqlalchemy.DateTime, default=datetime.utcnow),
+    sqlalchemy.Column("environment", sqlalchemy.String, index=True),
+)
+
+# Pydantic models
+class BuildStatusBase(BaseModel):
+    agent_version_id: str
+    build_id: str
+    step: str
+    status: str
+    message: str
+    timestamp: datetime
+    environment: str
+
+
+class BuildStatusCreate(BuildStatusBase):
+    pass
+
+
+class BuildStatus(BuildStatusBase):
+    id: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BuildSummary(BaseModel):
+    build_id: str
+    agent_version_id: str
+    environment: str
+    status: str
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    duration_seconds: Optional[float] = None
+    steps_total: int
+    steps_completed: int
+    steps_failed: int
+
+
+class ErrorResponse(BaseModel):
+    detail: str
+
+
+# FastAPI app
+app = FastAPI(
+    title="Agent Build Status API",
+    description="API for tracking and retrieving agent build statuses",
+    version="1.0.0",
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with specific origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# API Key security
+api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    if not api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing API key",
+        )
+    
+    # Strip "Bearer " prefix if present
+    if api_key.startswith("Bearer "):
+        api_key = api_key[7:]
+    
+    if api_key != API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+        )
+    return api_key
+
+
+@app.on_event("startup")
+async def startup():
+    await database.connect()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
+
+
+@app.post("/build-status", response_model=BuildStatus, status_code=status.HTTP_201_CREATED)
+async def create_build_status(
+    item: BuildStatusCreate, api_key: str = Depends(verify_api_key)
+):
+    """
+    Create a new build status entry.
+    This endpoint is called by the build script to report status updates.
+    """
+    query = build_status.insert().values(**item.dict())
+    last_record_id = await database.execute(query)
+    
+    # Return the created record
+    return {**item.dict(), "id": last_record_id}
+
+
+@app.get("/build-status", response_model=List[BuildStatus])
+async def get_build_statuses(
+    build_id: Optional[str] = None,
+    agent_version_id: Optional[str] = None,
+    environment: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    api_key: str = Depends(verify_api_key),
+):
+    """
+    Get build status entries with optional filtering.
+    """
+    query = build_status.select()
+    
+    # Apply filters
+    filters = []
+    if build_id:
+        filters.append(build_status.c.build_id == build_id)
+    if agent_version_id:
+        filters.append(build_status.c.agent_version_id == agent_version_id)
+    if environment:
+        filters.append(build_status.c.environment == environment)
+    if status:
+        filters.append(build_status.c.status == status)
+    
+    if filters:
+        query = query.where(and_(*filters))
+    
+    # Apply pagination
+    query = query.order_by(desc(build_status.c.timestamp)).limit(limit).offset(offset)
+    
+    return await database.fetch_all(query)
+
+
+@app.get("/build-status/{build_id}", response_model=List[BuildStatus])
+async def get_build_status_by_id(
+    build_id: str, api_key: str = Depends(verify_api_key)
+):
+    """
+    Get all status entries for a specific build ID.
+    """
+    query = build_status.select().where(build_status.c.build_id == build_id).order_by(build_status.c.timestamp)
+    result = await database.fetch_all(query)
+    
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Build ID {build_id} not found",
+        )
+    
+    return result
+
+
+@app.get("/build-summary", response_model=List[BuildSummary])
+async def get_build_summaries(
+    environment: Optional[str] = None,
+    agent_version_id: Optional[str] = None,
+    limit: int = Query(10, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+    api_key: str = Depends(verify_api_key),
+):
+    """
+    Get summaries of builds, including overall status and progress.
+    """
+    # First, get unique build IDs based on filters
+    build_id_query = sqlalchemy.select([
+        build_status.c.build_id,
+        build_status.c.agent_version_id,
+        build_status.c.environment
+    ]).distinct()
+    
+    # Apply filters
+    filters = []
+    if environment:
+        filters.append(build_status.c.environment == environment)
+    if agent_version_id:
+        filters.append(build_status.c.agent_version_id == agent_version_id)
+    
+    if filters:
+        build_id_query = build_id_query.where(and_(*filters))
+    
+    # Apply pagination
+    build_id_query = build_id_query.order_by(desc(build_status.c.timestamp)).limit(limit).offset(offset)
+    
+    build_ids = await database.fetch_all(build_id_query)
+    
+    summaries = []
+    for build in build_ids:
+        # Get all status entries for this build
+        status_query = build_status.select().where(
+            build_status.c.build_id == build.build_id
+        ).order_by(build_status.c.timestamp)
+        
+        status_entries = await database.fetch_all(status_query)
+        
+        if not status_entries:
+            continue
+        
+        # Calculate summary data
+        first_entry = status_entries[0]
+        last_entry = status_entries[-1]
+        
+        # Count steps by status
+        steps_total = len(status_entries)
+        steps_completed = sum(1 for entry in status_entries if entry.status == "Success")
+        steps_failed = sum(1 for entry in status_entries if entry.status == "Failed")
+        
+        # Determine overall build status
+        if any(entry.status == "Failed" for entry in status_entries):
+            overall_status = "Failed"
+        elif all(entry.status in ["Success", "Skipped"] for entry in status_entries):
+            overall_status = "Success"
+        else:
+            overall_status = "In Progress"
+        
+        # Calculate duration if build is completed
+        duration_seconds = None
+        completed_at = None
+        
+        if overall_status in ["Success", "Failed"]:
+            completed_at = last_entry.timestamp
+            duration_seconds = (completed_at - first_entry.timestamp).total_seconds()
+        
+        # Create summary
+        summary = BuildSummary(
+            build_id=build.build_id,
+            agent_version_id=build.agent_version_id,
+            environment=build.environment,
+            status=overall_status,
+            started_at=first_entry.timestamp,
+            completed_at=completed_at,
+            duration_seconds=duration_seconds,
+            steps_total=steps_total,
+            steps_completed=steps_completed,
+            steps_failed=steps_failed,
+        )
+        
+        summaries.append(summary)
+    
+    return summaries
+
+
+@app.get("/build-latest", response_model=BuildSummary)
+async def get_latest_build(
+    environment: Optional[str] = None,
+    agent_version_id: Optional[str] = None,
+    api_key: str = Depends(verify_api_key),
+):
+    """
+    Get the latest build summary for the specified environment and agent version.
+    """
+    # Use the same logic as get_build_summaries but with limit=1
+    summaries = await get_build_summaries(
+        environment=environment,
+        agent_version_id=agent_version_id,
+        limit=1,
+        offset=0,
+        api_key=api_key,
+    )
+    
+    if not summaries:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No builds found matching the criteria",
+        )
+    
+    return summaries[0]
+
+
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint that doesn't require authentication.
+    """
+    return {"status": "healthy"}
+
