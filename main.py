@@ -113,26 +113,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# JWT Token security
-async def verify_jwt_auth(jwt_token: str = Depends(validate_token)):
-    """Verify the JWT token using database validation"""
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            is_valid = verify_jwt_token(cursor, jwt_token)
-            if not is_valid:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Invalid JWT token",
-                )
-        return jwt_token
-    finally:
-        conn.close()
-
 
 @app.on_event("startup")
 async def startup():
-    await database.connect()
+    try:
+        await database.connect()
+        print("✅ Database Connected Successfully!")
+    except Exception as e:
+        print(f"❌ Database Connection Failed: {e}")
 
 
 @app.on_event("shutdown")
@@ -142,17 +130,17 @@ async def shutdown():
 
 @app.post("/build-status", response_model=BuildStatus, status_code=status.HTTP_201_CREATED)
 async def create_build_status(
-    item: BuildStatusCreate, jwt_token: str = Depends(verify_jwt_auth)
+    item: BuildStatusCreate, jwt_token: str = Depends(validate_token)
 ):
-    """
-    Create a new build status entry.
-    This endpoint is called by the build script to report status updates.
-    """
-    query = build_status.insert().values(**item.dict())
-    last_record_id = await database.execute(query)
     
-    # Return the created record
-    return {**item.dict(), "id": last_record_id}
+    print("Received Data:", item.dict())  # Debugging
+    try:
+        query = build_status.insert().values(**item.dict())
+        last_record_id = await database.execute(query)
+        return {**item.dict(), "id": last_record_id}
+    except Exception as e:
+        print(f"❌ Insert Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/build-status", response_model=List[BuildStatus])
@@ -163,7 +151,7 @@ async def get_build_statuses(
     status: Optional[str] = None,
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    jwt_token: str = Depends(verify_jwt_auth),
+    jwt_token: str = Depends(validate_token),
 ):
     """
     Get build status entries with optional filtering.
@@ -192,7 +180,7 @@ async def get_build_statuses(
 
 @app.get("/build-status/{build_id}", response_model=List[BuildStatus])
 async def get_build_status_by_id(
-    build_id: str, jwt_token: str = Depends(verify_jwt_auth)
+    build_id: str, jwt_token: str = Depends(validate_token)
 ):
     """
     Get all status entries for a specific build ID.
@@ -215,7 +203,7 @@ async def get_build_summaries(
     agent_version_id: Optional[str] = None,
     limit: int = Query(10, ge=1, le=50),
     offset: int = Query(0, ge=0),
-    jwt_token: str = Depends(verify_jwt_auth),
+    jwt_token: str = Depends(validate_token),
 ):
     """
     Get summaries of builds, including overall status and progress.
@@ -302,7 +290,7 @@ async def get_build_summaries(
 async def get_latest_build(
     environment: Optional[str] = None,
     agent_version_id: Optional[str] = None,
-    jwt_token: str = Depends(verify_jwt_auth),
+    jwt_token: str = Depends(validate_token),
 ):
     """
     Get the latest build summary for the specified environment and agent version.
@@ -330,6 +318,4 @@ async def health_check():
     """
     Health check endpoint that doesn't require authentication.
     """
-    return {"status": "healthy"}
-
-
+    return {"status": "
