@@ -1,5 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Query, status, Security
-from fastapi.security import APIKeyHeader
+from fastapi import FastAPI, HTTPException, Depends, Query, status, Security, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
@@ -9,13 +8,39 @@ import databases
 import sqlalchemy
 from sqlalchemy import and_, desc
 import os
+import psycopg2
+from psycopg2.extras import Json
 
 # Configuration
 DATABASE_URL = os.getenv("DB_CONNECTION_STRING")
-API_KEY = os.getenv("API_KEY")
 
 # Database connection
 database = databases.Database(DATABASE_URL)
+
+# JWT Token validation function
+async def validate_token(request: Request):
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    return auth_header.split('Bearer ')[1]
+
+# Database connection function
+def get_db_connection():
+    DB_CONNECTION_STRING = os.getenv("DB_CONNECTION_STRING")
+    if not DB_CONNECTION_STRING:
+        raise Exception("Database connection string not found")
+    return psycopg2.connect(DB_CONNECTION_STRING)
+
+# JWT token verification function
+def verify_jwt_token(cursor, jwt_token):
+    cursor.execute("""
+        SELECT EXISTS(
+            SELECT 1
+            FROM "agentic-platform".jwt_tokens
+            WHERE jwt_token = %s
+        )
+    """, (jwt_token,))
+    return cursor.fetchone()[0]
 
 # SQLAlchemy metadata
 metadata = sqlalchemy.MetaData()
@@ -88,27 +113,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API Key security
-api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
-
-
-async def verify_api_key(api_key: str = Security(api_key_header)):
-    if not api_key:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing API key",
-        )
-    
-    # Strip "Bearer " prefix if present
-    if api_key.startswith("Bearer "):
-        api_key = api_key[7:]
-    
-    if api_key != API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-        )
-    return api_key
+# JWT Token security
+async def verify_jwt_auth(jwt_token: str = Depends(validate_token)):
+    """Verify the JWT token using database validation"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            is_valid = verify_jwt_token(cursor, jwt_token)
+            if not is_valid:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid JWT token",
+                )
+        return jwt_token
+    finally:
+        conn.close()
 
 
 @app.on_event("startup")
@@ -123,7 +142,7 @@ async def shutdown():
 
 @app.post("/build-status", response_model=BuildStatus, status_code=status.HTTP_201_CREATED)
 async def create_build_status(
-    item: BuildStatusCreate, api_key: str = Depends(verify_api_key)
+    item: BuildStatusCreate, jwt_token: str = Depends(verify_jwt_auth)
 ):
     """
     Create a new build status entry.
@@ -144,7 +163,7 @@ async def get_build_statuses(
     status: Optional[str] = None,
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
-    api_key: str = Depends(verify_api_key),
+    jwt_token: str = Depends(verify_jwt_auth),
 ):
     """
     Get build status entries with optional filtering.
@@ -173,7 +192,7 @@ async def get_build_statuses(
 
 @app.get("/build-status/{build_id}", response_model=List[BuildStatus])
 async def get_build_status_by_id(
-    build_id: str, api_key: str = Depends(verify_api_key)
+    build_id: str, jwt_token: str = Depends(verify_jwt_auth)
 ):
     """
     Get all status entries for a specific build ID.
@@ -196,7 +215,7 @@ async def get_build_summaries(
     agent_version_id: Optional[str] = None,
     limit: int = Query(10, ge=1, le=50),
     offset: int = Query(0, ge=0),
-    api_key: str = Depends(verify_api_key),
+    jwt_token: str = Depends(verify_jwt_auth),
 ):
     """
     Get summaries of builds, including overall status and progress.
@@ -283,7 +302,7 @@ async def get_build_summaries(
 async def get_latest_build(
     environment: Optional[str] = None,
     agent_version_id: Optional[str] = None,
-    api_key: str = Depends(verify_api_key),
+    jwt_token: str = Depends(verify_jwt_auth),
 ):
     """
     Get the latest build summary for the specified environment and agent version.
@@ -294,7 +313,7 @@ async def get_latest_build(
         agent_version_id=agent_version_id,
         limit=1,
         offset=0,
-        api_key=api_key,
+        jwt_token=jwt_token,
     )
     
     if not summaries:
@@ -312,4 +331,5 @@ async def health_check():
     Health check endpoint that doesn't require authentication.
     """
     return {"status": "healthy"}
+
 
