@@ -94,3 +94,30 @@ def get_build_statuses(build_id: Optional[str] = None, environment: Optional[str
 @app.get("/health")
 def health_check():
     return {"status": "healthy"}
+
+@app.get("/agent-version", response_model=dict)
+def get_agent_version(agent_id: str = Query(..., description="Agent ID"), version: str = Query(..., description="Version number")):
+    connection = get_db_connection()
+    cursor = connection.cursor()
+    try:
+        query = '''
+            SELECT id FROM "agentic-platform".agent_versions 
+            WHERE agent_id = %s AND version = %s
+        '''
+        cursor.execute(query, (agent_id, version))
+        result = cursor.fetchone()
+        
+        if not result:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Agent version not found for agent_id {agent_id} and version {version}"
+            )
+            
+        return {"id": result["id"]}
+    except Exception as e:
+        if not isinstance(e, HTTPException):
+            raise HTTPException(status_code=500, detail=str(e))
+        raise e
+    finally:
+        cursor.close()
+        connection.close()
