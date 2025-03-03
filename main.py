@@ -48,14 +48,14 @@ class BuildStatusCreate(BaseModel):
 
 class BuildInfo(BaseModel):
     agent_version_id: str
-    build_id: str
+    agent_uuid: str
     version: str
     image_url: str
 
 class BuildInfoResponse(BaseModel):
     id: int
     agent_version_id: str
-    build_id: str
+    agent_uuid: str
     version: str
     image_url: str
     timestamp: datetime
