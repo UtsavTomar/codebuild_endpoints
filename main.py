@@ -145,9 +145,9 @@ def create_or_update_build_info(item: BuildInfo):
         cursor.execute(
             """
             SELECT id FROM "agentic-platform".build_info
-            WHERE agent_version_id = %s AND build_id = %s AND version = %s
+            WHERE agent_version_id = %s AND agent_uuid = %s AND version = %s
             """,
-            (item.agent_version_id, item.build_id, item.version)
+            (item.agent_version_id, item.agent_uuid, item.version)
         )
         existing = cursor.fetchone()
 
@@ -165,10 +165,10 @@ def create_or_update_build_info(item: BuildInfo):
             # Insert new entry
             cursor.execute(
                 """
-                INSERT INTO "agentic-platform".build_info (agent_version_id, build_id, version, image_url)
+                INSERT INTO "agentic-platform".build_info (agent_version_id, agent_uuid, version, image_url)
                 VALUES (%s, %s, %s, %s)
                 """,
-                (item.agent_version_id, item.build_id, item.version, item.image_url)
+                (item.agent_version_id, item.agent_uuid, item.version, item.image_url)
             )
 
         connection.commit()
@@ -185,7 +185,7 @@ def create_or_update_build_info(item: BuildInfo):
 
 @app.get("/build-info", response_model=List[BuildInfoResponse])
 def get_build_info(
-    build_id: Optional[str] = Query(None, description="Filter by Build ID"),
+    agent_uuid: Optional[str] = Query(None, description="Filter by Build ID"),
     agent_version_id: Optional[str] = Query(None, description="Filter by Agent Version ID"),
     version: Optional[str] = Query(None, description="Filter by Version"),
     limit: int = 50,
@@ -195,15 +195,15 @@ def get_build_info(
     cursor = connection.cursor()
     try:
         query = '''
-            SELECT id, agent_version_id, build_id, version, image_url, timestamp
+            SELECT id, agent_version_id, agent_uuid, version, image_url, timestamp
             FROM "agentic-platform".build_info
             WHERE 1=1
         '''
         params: List[Any] = []
 
-        if build_id:
-            query += " AND build_id = %s"
-            params.append(build_id)
+        if agent_uuid:
+            query += " AND agent_uuid = %s"
+            params.append(agent_uuid)
         if agent_version_id:
             query += " AND agent_version_id = %s"
             params.append(agent_version_id)
